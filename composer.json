@@ -1,0 +1,36 @@
+{
+    "name": "phpnomad/safemysql-integration",
+    "description": "SafeMySQL integration for PHPNomad database layer",
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Alex Standiford",
+            "email": "alex@standiford.us"
+        }
+    ],
+    "require": {
+        "php": ">=8.2",
+        "phpnomad/mysql-integration": "^1.0",
+        "phpnomad/db": "^2.1",
+        "phpnomad/datastore": "^2.0",
+        "colshrapnel/safemysql": "^1.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^9.6",
+        "mockery/mockery": "^1.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "PHPNomad\\SafeMySql\\Integration\\": "lib/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "PHPNomad\\SafeMySql\\Integration\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test:unit": "phpunit --testdox"
+    }
+}

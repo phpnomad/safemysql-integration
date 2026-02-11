@@ -64,7 +64,7 @@ class SafeMySqlDatabaseStrategy implements DatabaseStrategy
     public function query(string $query)
     {
         try {
-            $result = $this->db->query($query);
+            $result = $this->db->query("?p", $query);
 
             if ($result instanceof \mysqli_result) {
                 return $result->fetch_all(MYSQLI_ASSOC);

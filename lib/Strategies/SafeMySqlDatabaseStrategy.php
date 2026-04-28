@@ -64,7 +64,7 @@ class SafeMySqlDatabaseStrategy implements DatabaseStrategy
     public function query(string $query)
     {
         try {
-            $result = $this->db->query("?p", $query);
+            $result = $this->db->query($query);
 
             if ($result instanceof \mysqli_result) {
                 return $result->fetch_all(MYSQLI_ASSOC);
@@ -78,6 +78,16 @@ class SafeMySqlDatabaseStrategy implements DatabaseStrategy
         } catch (\Exception $e) {
             throw new DatastoreErrorException('Failed to execute query: ' . $e->getMessage(), 500, $e);
         }
+    }
+
+    /**
+     * Returns the last auto-increment ID from the current SafeMySQL connection.
+     *
+     * @return int
+     */
+    public function getLastInsertId(): int
+    {
+        return (int)$this->db->insertId();
     }
 
     protected function isAssociativeArray(array $arr): bool

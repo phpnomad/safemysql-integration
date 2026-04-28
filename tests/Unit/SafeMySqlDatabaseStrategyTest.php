@@ -90,4 +90,13 @@ class SafeMySqlDatabaseStrategyTest extends TestCase
 
         $this->strategy->query('SELECT 1');
     }
+
+    public function test_get_last_insert_id_uses_current_safemysql_connection(): void
+    {
+        $this->db->shouldReceive('insertId')
+            ->once()
+            ->andReturn(77);
+
+        $this->assertSame(77, $this->strategy->getLastInsertId());
+    }
 }

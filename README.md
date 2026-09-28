@@ -59,6 +59,38 @@ $container->bindFactory(
 
 From here, any PHPNomad component that depends on `DatabaseStrategy` or `AtomicOperationStrategy` resolves through the SafeMySQL-backed implementations.
 
+## Coordinated database operations
+
+Coordination is optional. Load `SafeMySqlCoordinationInitializer` after the normal MySQL initializer, then bind its `SafeMySqlCoordinatedDatabaseStrategy` with the same `SafeMySQL` instance and a `LoggerStrategy`.
+
+```php
+use PHPNomad\SafeMySql\Integration\SafeMySqlCoordinationInitializer;
+use PHPNomad\SafeMySql\Integration\Strategies\SafeMySqlCoordinatedDatabaseStrategy;
+
+$loader->load(new SafeMySqlCoordinationInitializer());
+$container->bindFactory(
+    SafeMySqlCoordinatedDatabaseStrategy::class,
+    fn () => new SafeMySqlCoordinatedDatabaseStrategy($db, $logger)
+);
+```
+
+The capability locks the complete primary-key identity of the coordination row, checks every declared participant, and runs the callback once in one transaction on the supplied `mysqli` connection. Declared writes commit together. The callback receives a backend that detects lost ownership and refuses queries after the operation ends. Do not perform external effects in that callback.
+
+It requires MySQL 8, autocommit enabled, `READ COMMITTED` or `REPEATABLE READ`, no ambient transaction, stable direct `TRIGGER` visibility for each participant, and InnoDB base tables without triggers. Unsupported cases fail before the callback.
+
+mysqli cannot report whether a transaction is open, so the adapter reads MySQL's transaction instrumentation instead. Grant the application account read access to four `performance_schema` tables:
+
+```sql
+GRANT SELECT ON performance_schema.threads TO 'app'@'%';
+GRANT SELECT ON performance_schema.events_transactions_current TO 'app'@'%';
+GRANT SELECT ON performance_schema.setup_consumers TO 'app'@'%';
+GRANT SELECT ON performance_schema.setup_instruments TO 'app'@'%';
+```
+
+MySQL 8 turns on the `transaction` instrument and the `events_transactions_current` consumer by default. Without the grant, or with either one off, coordination refuses before it opens a transaction and names what is missing.
+
+Deadlocks and lock waits become `CoordinatedOperationConflictException` only after rollback is confirmed. A failed commit or lost ownership can produce `CoordinatedOperationOutcomeUnknownException`. An unconfirmed rollback produces `CoordinatedOperationCleanupFailedException`, and a logger transport failure produces `CoordinatedOperationReportingFailedException` while retaining the classified database failure.
+
 ## Documentation
 
 Framework docs live at [phpnomad.com](https://phpnomad.com). For the underlying library, see the [SafeMySQL repository](https://github.com/colshrapnel/safemysql) and its placeholder reference.

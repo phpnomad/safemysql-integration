@@ -11,8 +11,8 @@
     ],
     "require": {
         "php": ">=8.2",
-        "phpnomad/mysql-integration": "^1.0",
-        "phpnomad/db": "^2.1",
+        "phpnomad/mysql-integration": "^1.3",
+        "phpnomad/db": "^2.2.4",
         "phpnomad/datastore": "^2.0",
         "colshrapnel/safemysql": "^1.0"
     },

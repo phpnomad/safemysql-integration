@@ -79,7 +79,15 @@ class SafeMySqlCoordinatedDatabaseStrategy extends SafeMySqlDatabaseStrategy imp
                 $this->abortAttempt($mysqli, 'callback', $tableNames, $failure);
             }
 
-            if (!$this->transactionIsActive($mysqli)) {
+            try {
+                $active = $this->transactionIsActive($mysqli);
+            } catch (Throwable $probe) {
+                $this->throwUnprovedCleanup($mysqli, $tableNames, 'commit', new DatastoreErrorException(
+                    'The coordinated operation could not confirm transaction ownership before commit.', 0, $probe
+                ), $probe);
+            }
+
+            if (!$active) {
                 $cause = new DatastoreErrorException('The coordinated operation lost transaction ownership.');
                 $failure = new CoordinatedOperationOutcomeUnknownException(
                     'The coordinated database operation outcome is unknown.', 0, $cause
@@ -105,7 +113,7 @@ class SafeMySqlCoordinatedDatabaseStrategy extends SafeMySqlDatabaseStrategy imp
     public function query(string $query)
     {
         $mysqli = $this->mysqli();
-        $enteredOwned = $this->enterOwnedStatement($mysqli);
+        $enteredOwned = $this->callerOwnershipCheck(fn () => $this->enterOwnedStatement($mysqli));
 
         try {
             $result = $this->nativeQuery($mysqli, $query);
@@ -122,7 +130,7 @@ class SafeMySqlCoordinatedDatabaseStrategy extends SafeMySqlDatabaseStrategy imp
         // which would otherwise overwrite mysqli's affected-row count.
         $affectedRows = $mysqli->affected_rows;
 
-        $this->requireRetainedOwnership($mysqli, $enteredOwned);
+        $this->callerOwnershipCheck(fn () => $this->requireRetainedOwnership($mysqli, $enteredOwned));
 
         if ($result instanceof mysqli_result) {
             $rows = $result->fetch_all(MYSQLI_ASSOC);
@@ -354,7 +362,12 @@ class SafeMySqlCoordinatedDatabaseStrategy extends SafeMySqlDatabaseStrategy imp
     /** @param list<string> $tables */
     private function abortAttempt(mysqli $mysqli, string $phase, array $tables, Throwable $failure): never
     {
-        if (!$this->transactionIsActive($mysqli)) {
+        try {
+            $active = $this->transactionIsActive($mysqli);
+        } catch (Throwable $probe) {
+            $this->throwUnprovedCleanup($mysqli, $tables, $phase, $failure, $probe);
+        }
+        if (!$active) {
             if ($this->hasInactiveAbortEvidence($failure) && $this->isDeadlockFailure($failure)) {
                 $operationFailure = new CoordinatedOperationConflictException('The coordinated database operation conflicted.', 0, $failure);
                 $this->reportFailure($phase, $tables, 'rolled_back', true, $operationFailure, $failure);
@@ -376,7 +389,15 @@ class SafeMySqlCoordinatedDatabaseStrategy extends SafeMySqlDatabaseStrategy imp
     /** @param list<string> $tables */
     private function handleCommitFailure(mysqli $mysqli, array $tables, Throwable $failure): never
     {
-        if (!$this->transactionIsActive($mysqli)) {
+        try {
+            $active = $this->transactionIsActive($mysqli);
+        } catch (Throwable) {
+            // The COMMIT may or may not have landed. A ROLLBACK is harmless
+            // either way and releases any locks a live session still holds.
+            $this->bestEffortRollback($mysqli);
+            $active = false;
+        }
+        if (!$active) {
             $operationFailure = new CoordinatedOperationOutcomeUnknownException('The coordinated database operation outcome is unknown.', 0, $failure);
             $this->reportFailure('commit', $tables, 'unknown', false, $operationFailure, $failure);
             throw $operationFailure;
@@ -389,6 +410,28 @@ class SafeMySqlCoordinatedDatabaseStrategy extends SafeMySqlDatabaseStrategy imp
         $operationFailure = new DatastoreErrorException('The coordinated database commit failed.', 0, $failure);
         $this->reportFailure('commit', $tables, 'rolled_back', false, $operationFailure, $failure);
         throw $operationFailure;
+    }
+
+    /**
+     * The ownership probe itself failed, so whether the transaction is still
+     * open is unknown. Release it if the session is alive, then report the
+     * cleanup as unconfirmed.
+     *
+     * @param list<string> $tables
+     */
+    private function throwUnprovedCleanup(mysqli $mysqli, array $tables, string $phase, Throwable $failure, Throwable $probe): never
+    {
+        $this->bestEffortRollback($mysqli);
+        $this->throwCleanupFailure($tables, $phase, $failure, $probe);
+    }
+
+    private function bestEffortRollback(mysqli $mysqli): void
+    {
+        try {
+            $mysqli->query('ROLLBACK');
+        } catch (Throwable) {
+            // A dead session has already rolled back on the server.
+        }
     }
 
     /** @param list<string> $tables */
@@ -453,6 +496,25 @@ class SafeMySqlCoordinatedDatabaseStrategy extends SafeMySqlDatabaseStrategy imp
     private function closeOwnedAttempt(): void { $this->ownedAttemptMysqli = null; $this->inactiveAbortEvidence = null; }
     private function hasInactiveAbortEvidence(Throwable $failure): bool { return $this->inactiveAbortEvidence === $failure; }
 
+    /**
+     * Runs an ownership check for a caller's query(). A failed probe reaches
+     * the caller as a datastore error, like any other query failure, rather
+     * than as a bare driver error. Internal coordination statements skip this:
+     * abortAttempt() classifies their failures itself.
+     *
+     * @template T
+     * @param callable(): T $check
+     * @return T
+     */
+    private function callerOwnershipCheck(callable $check): mixed
+    {
+        try {
+            return $check();
+        } catch (MysqliDriverException $probe) {
+            throw new DatastoreErrorException('The coordinated operation could not confirm transaction ownership.', 0, $probe);
+        }
+    }
+
     private function enterOwnedStatement(mysqli $mysqli): bool
     {
         if ($this->ownedAttemptMysqli !== $mysqli) { return false; }
@@ -491,12 +553,19 @@ class SafeMySqlCoordinatedDatabaseStrategy extends SafeMySqlDatabaseStrategy imp
     {
         // mysqli does not expose PDO::inTransaction(). MySQL 8's current
         // transaction instrumentation identifies the session without adding a
-        // user-table read or write to an ambient transaction.
-        $result = $this->nativeQuery(
-            $mysqli,
-            'SELECT STATE FROM performance_schema.events_transactions_current '
-            . 'WHERE THREAD_ID = (SELECT THREAD_ID FROM performance_schema.threads WHERE PROCESSLIST_ID = CONNECTION_ID())'
-        );
+        // user-table read or write to an ambient transaction. This calls
+        // mysqli directly, not nativeQuery(): a failed probe must not be
+        // observed by another probe, or it recurses until memory runs out.
+        $sql = 'SELECT STATE FROM performance_schema.events_transactions_current '
+            . 'WHERE THREAD_ID = (SELECT THREAD_ID FROM performance_schema.threads WHERE PROCESSLIST_ID = CONNECTION_ID())';
+        try {
+            $result = $mysqli->query($sql);
+        } catch (Throwable $failure) {
+            throw $this->driverFailure($mysqli, 'The transaction ownership probe failed.', $failure);
+        }
+        if ($result === false) {
+            throw $this->driverFailure($mysqli, 'The transaction ownership probe failed.');
+        }
         return $this->firstValue($result) === 'ACTIVE';
     }
 
@@ -580,8 +649,9 @@ class SafeMySqlCoordinatedDatabaseStrategy extends SafeMySqlDatabaseStrategy imp
         $injectedState = $previous !== null && property_exists($previous, 'sqlState') && is_string($previous->sqlState)
             ? $previous->sqlState
             : null;
+        $detail = $mysqli->error !== '' ? $mysqli->error : ($previous?->getMessage() ?? '');
         return new MysqliDriverException(
-            $message,
+            $detail !== '' ? $message . ' ' . $detail : $message,
             $mysqli->errno ?: ($previous?->getCode() ?? 0),
             $mysqli->sqlstate !== '00000' ? $mysqli->sqlstate : $injectedState,
             $previous

@@ -61,18 +61,17 @@ From here, any PHPNomad component that depends on `DatabaseStrategy` or `AtomicO
 
 ## Coordinated database operations
 
-Coordination is optional. Load `SafeMySqlCoordinationInitializer` after the normal MySQL initializer, then bind its `SafeMySqlCoordinatedDatabaseStrategy` with the same `SafeMySQL` instance and a `LoggerStrategy`.
+Coordination is optional. Load `SafeMySqlCoordinationInitializer` after the normal MySQL initializer. It binds `SafeMySqlCoordinatedDatabaseStrategy` as the `DatabaseStrategy`, and the container autowires it, so bind the application's `SafeMySQL` instance and a `LoggerStrategy`. Without the `SafeMySQL` binding the container builds a new, unconfigured connection.
 
 ```php
 use PHPNomad\SafeMySql\Integration\SafeMySqlCoordinationInitializer;
-use PHPNomad\SafeMySql\Integration\Strategies\SafeMySqlCoordinatedDatabaseStrategy;
 
-$loader->load(new SafeMySqlCoordinationInitializer());
-$container->bindFactory(
-    SafeMySqlCoordinatedDatabaseStrategy::class,
-    fn () => new SafeMySqlCoordinatedDatabaseStrategy($db, $logger)
-);
+$container->bindFactory(SafeMySQL::class, fn () => $db);
+// ...then, in the initializer list, after the normal MySQL initializer:
+new SafeMySqlCoordinationInitializer(),
 ```
+
+The coordinated strategy extends `SafeMySqlDatabaseStrategy`, so ordinary queries behave as before.
 
 The capability locks the complete primary-key identity of the coordination row, checks every declared participant, and runs the callback once in one transaction on the supplied `mysqli` connection. Declared writes commit together. The callback receives a backend that detects lost ownership and refuses queries after the operation ends. Do not perform external effects in that callback.
 
